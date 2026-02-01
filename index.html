@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Slender 3D - Ultra Fix</title>
+    <title>Slender 3D - Limpieza Total</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; touch-action: none; }
@@ -34,7 +34,7 @@
             <button class="btn-join" onclick="connectToHost()">UNIRSE AL JUEGO</button>
         </div>
         <button id="start-btn" class="btn-start" onclick="startGame()">INICIAR PARTIDA</button>
-        <div id="status-msg" style="color: #f1c40f; margin-top: 10px;">Crea o únete rápidamente</div>
+        <div id="status-msg" style="color: #f1c40f; margin-top: 10px;">Limpia fantasmas automáticamente</div>
     </div>
 </div>
 
@@ -80,35 +80,20 @@
     peer.on('open', id => {
         myId = id;
         document.getElementById('my-id').innerText = id;
-        players[id] = { x: posX, y: posY, color: '#3498db', isDead: false };
+        players[id] = { x: posX, y: posY, color: '#3498db', isDead: false, lastSeen: Date.now() };
         document.getElementById('start-btn').style.display = 'block'; 
     });
 
     peer.on('connection', conn => {
         conn.on('open', () => {
             connections[conn.peer] = conn;
-            players[conn.peer] = { x: 1.5, y: 1.5, color: '#e67e22', isDead: false };
-            addChatMessage("Sistema", "Jugador unido.");
+            players[conn.peer] = { x: 1.5, y: 1.5, color: '#e67e22', isDead: false, lastSeen: Date.now() };
+            addChatMessage("Sistema", "Jugador conectado.");
             syncToAll();
         });
         conn.on('data', handleData);
         conn.on('close', () => removePlayer(conn.peer));
-        conn.on('error', () => removePlayer(conn.peer));
     });
-
-    function removePlayer(peerId) {
-        if (players[peerId]) {
-            delete connections[peerId];
-            delete players[peerId];
-            addChatMessage("Sistema", "Jugador salió. Limpiando fantasmas...");
-            
-            if (Object.keys(players).length <= 1 && gameStarted) {
-                alert("FIN: Todos los jugadores se fueron.");
-                location.reload();
-            }
-            syncToAll();
-        }
-    }
 
     function handleData(data) {
         if (data.type === 'move') {
@@ -116,16 +101,11 @@
                 players[data.id].x = data.x;
                 players[data.id].y = data.y;
                 players[data.id].isDead = data.isDead;
+                players[data.id].lastSeen = Date.now(); // Heartbeat: sigue vivo
             }
         } else if (data.type === 'chat') {
             addChatMessage(data.sender, data.text);
             if (!hostConn) broadcast(data, data.sender);
-        } else if (data.type === 'collect') {
-            if(notes[data.index] && !notes[data.index].collected) {
-                notes[data.index].collected = true;
-                notesCollected++;
-                syncToAll();
-            }
         } else if (data.type === 'update') {
             notes = data.notes;
             slenderman = data.slenderman;
@@ -134,12 +114,42 @@
                 gameStarted = true;
                 document.getElementById('ui').classList.add('hidden');
             }
-            // Sincronización instantánea de lista de jugadores activos
+            // Sincronizar lista de jugadores (borra fantasmas en clientes)
             let incoming = data.players;
             for(let id in players) if(id !== myId && !incoming[id]) delete players[id];
             for(let id in incoming) if(id !== myId) players[id] = incoming[id];
         }
     }
+
+    function removePlayer(peerId) {
+        if (players[peerId]) {
+            delete players[peerId];
+            if (connections[peerId]) {
+                connections[peerId].close();
+                delete connections[peerId];
+            }
+            addChatMessage("Sistema", "Un jugador abandonó la partida.");
+            
+            // Si eres el host y te quedas solo
+            if (Object.keys(players).length <= 1 && gameStarted) {
+                alert("Te has quedado solo. Partida terminada.");
+                location.reload();
+            }
+            syncToAll();
+        }
+    }
+
+    // Monitor de conexión: Si no recibimos datos en 4 segundos, fuera.
+    setInterval(() => {
+        if (!hostConn) { // Solo el Host vigila
+            const ahora = Date.now();
+            for (let id in players) {
+                if (id !== myId && ahora - players[id].lastSeen > 4000) {
+                    removePlayer(id);
+                }
+            }
+        }
+    }, 2000);
 
     function connectToHost() {
         const hId = document.getElementById('peer-id-input').value;
@@ -147,17 +157,17 @@
         hostConn = peer.connect(hId);
         hostConn.on('open', () => {
             document.getElementById('setup-controls').classList.add('hidden');
-            document.getElementById('status-msg').innerText = "Conectado. Esperando host...";
+            document.getElementById('status-msg').innerText = "Conectado. Esperando inicio...";
             setInterval(() => {
                 if(hostConn.open) hostConn.send({ type: 'move', id: myId, x: posX, y: posY, isDead: isDead });
-            }, 20); // Más rápido (50fps de red)
+            }, 30);
         });
         hostConn.on('data', handleData);
-        hostConn.on('close', () => { alert("Host desconectado."); location.reload(); });
+        hostConn.on('close', () => { alert("Conexión con Host perdida."); location.reload(); });
     }
 
     function startGame() {
-        if (Object.keys(players).length < 2) return alert("Mínimo 2 jugadores.");
+        if (Object.keys(players).length < 2) return alert("Necesitas más jugadores.");
         gameStarted = true;
         document.getElementById('ui').classList.add('hidden');
         notes = [];
@@ -187,14 +197,10 @@
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
-    chatInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && chatInput.value.trim() !== "") {
-            addChatMessage("Tú", chatInput.value);
-            broadcast({ type: 'chat', sender: myId, text: chatInput.value });
-            chatInput.value = ""; canvas.focus();
-        }
-    });
+    // Cerrar conexión limpia al salir de la pestaña
+    window.addEventListener('unload', () => peer.destroy());
 
+    // --- RENDER Y MOVIMIENTO ---
     canvas.addEventListener('click', () => { if(!chatInput.matches(':focus')) canvas.requestPointerLock(); });
 
     document.addEventListener('mousemove', (e) => {
@@ -235,13 +241,6 @@
             }
             syncToAll();
         }
-
-        notes.forEach((n, i) => {
-            if(!n.collected && Math.hypot(posX - n.x, posY - n.y) < 0.5) {
-                if(!hostConn) { n.collected = true; notesCollected++; syncToAll(); } 
-                else { hostConn.send({type: 'collect', index: i}); }
-            }
-        });
     }
 
     function render() {
@@ -250,10 +249,11 @@
         ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h);
 
         if(!gameStarted) {
-            ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.fillText("ESPERANDO JUGADORES...", w/2, h/2);
+            ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.fillText("LOBBY: ESPERANDO JUGADORES", w/2, h/2);
             requestAnimationFrame(render); return;
         }
 
+        // Raycasting simple
         let zBuffer = new Array(w);
         for(let x = 0; x < w; x++) {
             let cameraX = 2 * x / w - 1;
@@ -275,14 +275,15 @@
             let perpDist = (side === 0) ? (sideDistX - deltaX) : (sideDistY - deltaY);
             zBuffer[x] = perpDist;
             let lineHeight = Math.floor(h / perpDist);
-            let color = Math.max(0, 180 - (perpDist * 20));
+            let color = Math.max(0, 150 - (perpDist * 15));
             ctx.strokeStyle = `rgb(${side?color*0.5:color},${side?color*0.5:color},${side?color*0.5:color})`;
             ctx.beginPath(); ctx.moveTo(x, h/2-lineHeight/2); ctx.lineTo(x, h/2+lineHeight/2); ctx.stroke();
         }
 
+        // Dibujar sprites (Jugadores y Slender)
         let sprites = [];
         notes.forEach(n => { if(!n.collected) sprites.push({...n, color:"white", sX:0.15, sY:0.2}); });
-        if(slenderman.active) sprites.push({...slenderman, color:"#111", sX:0.5, sY:1.8, isSlender:true});
+        if(slenderman.active) sprites.push({...slenderman, color:"#111", sX:0.5, sY:1.8});
         for(let id in players) if(id !== myId && !players[id].isDead) sprites.push({...players[id], sX:0.4, sY:0.6});
 
         sprites.sort((a,b) => Math.hypot(posX-b.x, posY-b.y) - Math.hypot(posX-a.x, posY-a.y));
