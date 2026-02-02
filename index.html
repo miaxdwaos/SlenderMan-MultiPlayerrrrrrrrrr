@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Slender P2P - Final Sync</title>
+    <title>Slender P2P - Anti-Ghosting</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body { margin: 0; background: #000; color: white; font-family: 'Courier New', monospace; overflow: hidden; }
@@ -63,6 +63,24 @@
         let isHost = false;
         let peer, conn;
 
+        // --- Lógica de Desconexión Instantánea ---
+        window.addEventListener('beforeunload', () => {
+            if (conn && conn.open) {
+                conn.send({ type: 'DISCONNECT' });
+            }
+        });
+
+        function removeRemotePlayer() {
+            remotePlayer.active = false;
+            remotePlayer.x = -1000; // Sacarlo de pantalla
+            console.log("El otro jugador se ha ido.");
+            if (gameRunning) {
+                // Si te quedas solo en la partida, podrías decidir si seguir o no.
+            } else {
+                location.reload(); // Si están en lobby, reinicia para limpiar.
+            }
+        }
+
         function showJoinInput() {
             document.getElementById('main-menu').style.display = 'none';
             document.getElementById('join-section').style.display = 'block';
@@ -92,9 +110,13 @@
         }
 
         function setupConnection() {
+            // Detectar cierre de conexión por PeerJS
+            conn.on('close', removeRemotePlayer);
+            
             conn.on('data', (data) => {
-                if (data.type === 'PAGES_DATA') pages = data.pages; // Recibir mapa del Host
+                if (data.type === 'PAGES_DATA') pages = data.pages;
                 if (data.type === 'START') startGame();
+                if (data.type === 'DISCONNECT') removeRemotePlayer();
                 if (data.type === 'SYNC') {
                     remotePlayer.x = data.x;
                     remotePlayer.y = data.y;
@@ -111,12 +133,13 @@
         }
 
         function broadcastStart() {
-            // Host genera páginas y las envía
             for(let i=0; i<8; i++) {
                 pages.push({ x: Math.random()*(canvas.width-100)+50, y: Math.random()*(canvas.height-100)+50, collected: false });
             }
-            conn.send({ type: 'PAGES_DATA', pages: pages });
-            conn.send({ type: 'START' });
+            if(conn && conn.open) {
+                conn.send({ type: 'PAGES_DATA', pages: pages });
+                conn.send({ type: 'START' });
+            }
             startGame();
         }
 
@@ -140,30 +163,26 @@
         function update() {
             if (!gameRunning) return;
 
-            // Movimiento si está vivo
             if (!player.dead) {
                 if (keys['w'] || keys['arrowup']) player.y -= player.speed;
                 if (keys['s'] || keys['arrowdown']) player.y += player.speed;
                 if (keys['a'] || keys['arrowleft']) player.x -= player.speed;
                 if (keys['d'] || keys['arrowright']) player.x += player.speed;
 
-                // Colisión con Slender
                 if (Math.hypot(player.x - slender.x, player.y - slender.y) < 45) {
                     player.dead = true;
                     player.angle = -Math.PI / 2;
                 }
 
-                // Recoger páginas
                 pages.forEach((p, idx) => {
                     if(!p.collected && Math.hypot(player.x+25-p.x, player.y+25-p.y) < 40) {
                         p.collected = true;
-                        if(conn) conn.send({ type: 'COLLECT', index: idx });
+                        if(conn && conn.open) conn.send({ type: 'COLLECT', index: idx });
                         checkPages();
                     }
                 });
             }
 
-            // IA Slender (Persigue al vivo más cercano)
             let target = null;
             let d1 = !player.dead ? Math.hypot(slender.x - player.x, slender.y - player.y) : Infinity;
             let d2 = (remotePlayer.active && !remotePlayer.dead) ? Math.hypot(slender.x - remotePlayer.x, slender.y - remotePlayer.y) : Infinity;
@@ -175,12 +194,10 @@
                 slender.y += Math.sin(ang) * (slender.speed + (collectedPages * 0.2));
             }
 
-            // Revisar derrota (Todos muertos)
             if (player.dead && (!remotePlayer.active || remotePlayer.dead)) {
                 showEndMsg("YOU LOSE", "red");
             }
 
-            // Sync
             if (conn && conn.open) {
                 conn.send({ type: 'SYNC', x: player.x, y: player.y, dead: player.dead, angle: player.angle });
             }
@@ -189,9 +206,7 @@
         function checkPages() {
             collectedPages = pages.filter(p => p.collected).length;
             document.getElementById('pageCount').innerText = collectedPages;
-            if (collectedPages >= 8) {
-                showEndMsg("YOU WON", "#0f0");
-            }
+            if (collectedPages >= 8) showEndMsg("YOU WON", "#0f0");
         }
 
         function showEndMsg(txt, color) {
@@ -204,26 +219,21 @@
         }
 
         function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.fillStyle = "#020202";
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-            // Páginas
-            ctx.fillStyle = "white";
-            pages.forEach(p => { if(!p.collected) ctx.fillRect(p.x, p.y, 12, 18); });
+            pages.forEach(p => { if(!p.collected) { ctx.fillStyle = "white"; ctx.fillRect(p.x, p.y, 12, 18); }});
 
-            // Slender
             ctx.fillStyle = "black";
             ctx.fillRect(slender.x, slender.y, slender.w, slender.h);
             ctx.fillStyle = "white";
             ctx.fillRect(slender.x+5, slender.y-15, slender.w-10, 15);
 
-            // Jugadores
             const myColor = isHost ? player.color : remotePlayer.color;
             const otherColor = isHost ? remotePlayer.color : player.color;
 
-            // Dibujar yo
             drawSprite(player.x, player.y, myColor, player.angle);
-            // Dibujar otro
             if (remotePlayer.active) drawSprite(remotePlayer.x, remotePlayer.y, otherColor, remotePlayer.angle);
         }
 
